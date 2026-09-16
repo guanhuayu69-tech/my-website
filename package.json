@@ -1,0 +1,9 @@
+{
+  "name": "pujiantang-tcm-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-site.mjs",
+    "test": "node tests/worker.test.mjs && node tests/site.test.mjs"
+  }
+}
