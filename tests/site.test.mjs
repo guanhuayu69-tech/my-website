@@ -51,7 +51,7 @@ const htmlFiles = (await readdir(siteDir)).filter((name) => name.endsWith('.html
 for (const filename of htmlFiles) {
   const page = await readFile(path.join(siteDir, filename), 'utf8');
   assert.equal(
-    (page.match(/粤ICP备20243164610号/g) || []).length,
+    (page.match(/粤ICP备2024316610号-2/g) || []).length,
     1,
     `ICP filing number must appear exactly once in ${filename}`
   );
