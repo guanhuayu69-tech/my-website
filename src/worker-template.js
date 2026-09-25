@@ -5,6 +5,12 @@ const COOKIE_NAME = 'pj_tcm_turns_v1';
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/chat/completions';
 const WECHAT_ID = 'dannyyuguanhua';
 const DEFAULT_MODEL = 'deepseek-flash';
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 40_000;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 12;
+const RATE_LIMIT_MAX_BUCKETS = 5_000;
+const rateLimitBuckets = new Map();
+let lastRateLimitSweep = 0;
 
 const SERVER_GUARDRAILS = `
 
@@ -43,6 +49,50 @@ function json(data, status = 200, extraHeaders = {}) {
       ...extraHeaders
     }
   });
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function requestClientIp(request) {
+  const forwarded = request.headers.get('X-Forwarded-For')?.split(',')[0];
+  const candidates = [
+    request.headers.get('CF-Connecting-IP'),
+    request.headers.get('X-Client-IP'),
+    request.headers.get('X-Real-IP'),
+    forwarded
+  ];
+  for (const value of candidates) {
+    const candidate = value?.trim();
+    if (candidate && candidate.length <= 64 && /^[0-9a-f:.]+$/i.test(candidate)) return candidate;
+  }
+  return 'unknown';
+}
+
+function checkRateLimit(request, now = Date.now()) {
+  if (now - lastRateLimitSweep >= RATE_LIMIT_WINDOW_MS) {
+    for (const [key, bucket] of rateLimitBuckets) {
+      if (bucket.resetAt <= now) rateLimitBuckets.delete(key);
+    }
+    lastRateLimitSweep = now;
+  }
+
+  const key = requestClientIp(request);
+  const existing = rateLimitBuckets.get(key);
+  if (!existing || existing.resetAt <= now) {
+    if (!existing && rateLimitBuckets.size >= RATE_LIMIT_MAX_BUCKETS) {
+      const oldestKey = rateLimitBuckets.keys().next().value;
+      if (oldestKey !== undefined) rateLimitBuckets.delete(oldestKey);
+    }
+    rateLimitBuckets.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return { allowed: true, retryAfter: 0 };
+  }
+
+  existing.count += 1;
+  const retryAfter = Math.max(1, Math.ceil((existing.resetAt - now) / 1000));
+  return { allowed: existing.count <= RATE_LIMIT_MAX_REQUESTS, retryAfter };
 }
 
 function base64Url(bytes) {
@@ -155,6 +205,14 @@ async function handleChat(request, env) {
     }, 429);
   }
 
+  const rateLimit = checkRateLimit(request);
+  if (!rateLimit.allowed) {
+    return json({
+      error: '发送得太快了，请稍后再试。本次不计入 8 条咨询。',
+      retryAfter: rateLimit.retryAfter
+    }, 429, { 'Retry-After': String(rateLimit.retryAfter) });
+  }
+
   const nextTurn = count + 1;
   const isFinalTurn = nextTurn === MAX_TURNS;
   const cookie = await turnCookie(nextTurn, env.CHAT_SESSION_SECRET);
@@ -185,10 +243,14 @@ async function handleChat(request, env) {
 
   const history = sanitizeHistory(body?.history);
   const systemContent = SYSTEM_PROMPT + SERVER_GUARDRAILS + (isFinalTurn ? FINAL_SUMMARY_RULE : '');
-  let upstream;
+  let result;
+  const controller = new AbortController();
+  const timeoutMs = positiveInteger(env.DEEPSEEK_TIMEOUT_MS, DEFAULT_UPSTREAM_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    upstream = await fetch(DEEPSEEK_ENDPOINT, {
+    const upstream = await fetch(DEEPSEEK_ENDPOINT, {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'Authorization': `Bearer ${env.DEEPSEEK_API_KEY}`,
         'Content-Type': 'application/json'
@@ -203,19 +265,22 @@ async function handleChat(request, env) {
         stream: false
       })
     });
-  } catch {
+    if (!upstream.ok) {
+      return json({ error: '智能咨询服务暂时繁忙，请稍后重试。' }, 502);
+    }
+    try {
+      result = await upstream.json();
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === 'AbortError') throw error;
+      return json({ error: '智能咨询服务返回异常，请稍后重试。' }, 502);
+    }
+  } catch (error) {
+    if (controller.signal.aborted || error?.name === 'AbortError') {
+      return json({ error: '智能咨询等待超时，请稍后重试。本次不计入 8 条咨询。' }, 504);
+    }
     return json({ error: '智能咨询服务暂时无法连接，请稍后重试。' }, 502);
-  }
-
-  if (!upstream.ok) {
-    return json({ error: '智能咨询服务暂时繁忙，请稍后重试。' }, 502);
-  }
-
-  let result;
-  try {
-    result = await upstream.json();
-  } catch {
-    return json({ error: '智能咨询服务返回异常，请稍后重试。' }, 502);
+  } finally {
+    clearTimeout(timeout);
   }
   const reply = result?.choices?.[0]?.message?.content?.trim();
   if (!reply) return json({ error: '本次没有生成有效回复，请重新发送。' }, 502);

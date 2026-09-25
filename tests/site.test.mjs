@@ -7,6 +7,8 @@ const siteDir = fileURLToPath(new URL('../site/', import.meta.url));
 const html = await readFile(path.join(siteDir, 'index.html'), 'utf8');
 const css = await readFile(new URL('../site/styles.css', import.meta.url), 'utf8');
 const js = await readFile(new URL('../site/site.js', import.meta.url), 'utf8');
+const robots = await readFile(new URL('../site/robots.txt', import.meta.url), 'utf8');
+const sitemap = await readFile(new URL('../site/sitemap.xml', import.meta.url), 'utf8');
 
 for (const required of [
   'id="main-content"',
@@ -30,6 +32,10 @@ assert.match(js, /1200/);
 assert.match(js, /queryPrefills/);
 assert.match(js, /consult-visible/);
 assert.match(css, /body\.consult-visible \.mobile-dock/);
+assert.match(html, /https:\/\/pujiantcm\.com\.cn\//);
+assert.doesNotMatch(html, /pujiantang-tcm-ai-guide\.lovable\.app/);
+assert.match(robots, /https:\/\/pujiantcm\.com\.cn\/sitemap\.xml/);
+assert.equal((sitemap.match(/<url>/g) || []).length, 8);
 
 const sectionOrder = ['id="paths"', 'id="services"', 'id="doctor"', 'id="cases"', 'id="consult"', 'id="contact"'];
 for (let index = 1; index < sectionOrder.length; index += 1) {
@@ -44,6 +50,12 @@ for (const id of new Set(navHrefIds)) {
 const htmlFiles = (await readdir(siteDir)).filter((name) => name.endsWith('.html'));
 for (const filename of htmlFiles) {
   const page = await readFile(path.join(siteDir, filename), 'utf8');
+  assert.equal(
+    (page.match(/粤ICP备20243164610号/g) || []).length,
+    1,
+    `ICP filing number must appear exactly once in ${filename}`
+  );
+  assert.match(page, /href="https:\/\/beian\.miit\.gov\.cn\/"/, `Missing MIIT filing link in ${filename}`);
   for (const match of page.matchAll(/(?:href|src)="([^"]+)"/g)) {
     const target = match[1];
     if (/^(?:https?:|tel:|mailto:|data:|#)/.test(target)) continue;

@@ -2,8 +2,12 @@
   "name": "pujiantang-tcm-site",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "node scripts/build-site.mjs",
-    "test": "node tests/worker.test.mjs && node tests/site.test.mjs"
+    "start:ecs": "node --env-file=.env scripts/serve-node.mjs",
+    "test": "node tests/worker.test.mjs && node tests/site.test.mjs && node tests/node-server.test.mjs"
   }
 }
